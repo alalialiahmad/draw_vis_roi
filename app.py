@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTextEdit, QFileDialog, QMessageBox, QSplitter,
     QGroupBox, QComboBox, QStatusBar, QSizePolicy,
-    QShortcut,
+    QShortcut, QCheckBox,
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap, QKeySequence
@@ -165,6 +165,26 @@ QSplitter::handle {
     background-color: #2e2e50;
     width: 3px;
 }
+
+QCheckBox {
+    color: #e0e0f0;
+    spacing: 8px;
+    font-size: 13px;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 2px solid #3a3a5c;
+    border-radius: 4px;
+    background-color: #22223b;
+}
+QCheckBox::indicator:hover {
+    border-color: #7c3aed;
+}
+QCheckBox::indicator:checked {
+    background-color: #7c3aed;
+    border-color: #7c3aed;
+}
 """
 
 
@@ -172,7 +192,7 @@ QSplitter::handle {
 # Coordinate parser
 # ---------------------------------------------------------------------------
 
-def parse_coordinates(text: str) -> list[tuple[int, int]]:
+def parse_coordinates(text: str) -> list[tuple[float, float]]:
     """
     Parse polygon coordinates from various text formats:
       - [[x1,y1], [x2,y2], ...]     JSON / Python nested list
@@ -180,12 +200,16 @@ def parse_coordinates(text: str) -> list[tuple[int, int]]:
       - x1,y1 x2,y2 ...             Space-separated pairs
       - x1,y1,x2,y2,...             Flat CSV
 
-    Returns list of (x, y) integer tuples.
+    Floats are preserved so callers can detect normalized (0–1) coords.
     Raises ValueError if parsing fails.
     """
     text = text.strip()
     if not text:
         raise ValueError("No coordinates provided.")
+
+    def _to_num(v):
+        f = float(v)
+        return int(f) if f == int(f) else f
 
     # 1) Try JSON: [[x,y], ...]
     try:
@@ -193,7 +217,7 @@ def parse_coordinates(text: str) -> list[tuple[int, int]]:
         if isinstance(data, list) and len(data) >= 2:
             first = data[0]
             if isinstance(first, (list, tuple)) and len(first) == 2:
-                return [(int(float(p[0])), int(float(p[1]))) for p in data]
+                return [(_to_num(p[0]), _to_num(p[1])) for p in data]
     except (json.JSONDecodeError, TypeError, KeyError):
         pass
 
@@ -203,7 +227,7 @@ def parse_coordinates(text: str) -> list[tuple[int, int]]:
         if isinstance(data, (list, tuple)) and len(data) >= 2:
             first = data[0]
             if isinstance(first, (list, tuple)) and len(first) == 2:
-                return [(int(float(p[0])), int(float(p[1]))) for p in data]
+                return [(_to_num(p[0]), _to_num(p[1])) for p in data]
     except (ValueError, SyntaxError):
         pass
 
@@ -212,7 +236,7 @@ def parse_coordinates(text: str) -> list[tuple[int, int]]:
     if len(numbers) >= 4 and len(numbers) % 2 == 0:
         points = []
         for i in range(0, len(numbers), 2):
-            points.append((int(float(numbers[i])), int(float(numbers[i + 1]))))
+            points.append((_to_num(numbers[i]), _to_num(numbers[i + 1])))
         return points
 
     raise ValueError(
@@ -223,6 +247,11 @@ def parse_coordinates(text: str) -> list[tuple[int, int]]:
         "  x1,y1 x2,y2 ...\n"
         "  x1,y1,x2,y2,..."
     )
+
+
+def _is_normalized(points: list[tuple[float, float]]) -> bool:
+    """Return True if all coordinate values are in the [0.0, 1.0] range."""
+    return all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in points)
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +712,14 @@ class DrawROITab(QWidget):
             self.fmt_combo.addItem(f"{label}  —  {example}")
         self.fmt_combo.currentIndexChanged.connect(self._update_output)
         fmt_lay.addWidget(self.fmt_combo)
+
+        self.chk_normalize = QCheckBox("Normalize coordinates  (x / width, y / height  →  0.0–1.0)")
+        self.chk_normalize.setToolTip(
+            "Divide each x by image width and each y by image height.\n"
+            "Output values will be in the range [0.0, 1.0]."
+        )
+        self.chk_normalize.stateChanged.connect(self._update_output)
+        fmt_lay.addWidget(self.chk_normalize)
         rlay.addWidget(fmt_box)
 
         # Coordinates output
@@ -755,22 +792,32 @@ class DrawROITab(QWidget):
         self._update_output()
 
     def _update_output(self):
-        points = self.canvas.points
-        if not points:
+        raw_points = self.canvas.points
+        if not raw_points:
             self.coord_out.setPlainText("")
             return
 
+        # Apply normalization if requested
+        normalize = self.chk_normalize.isChecked()
+        if normalize and self.canvas.orig_image:
+            iw, ih = self.canvas.orig_image.size
+            points = [(x / iw, y / ih) for x, y in raw_points]
+            fmt_val = lambda v: f"{v:.6f}"
+        else:
+            points = raw_points
+            fmt_val = lambda v: str(v)
+
         idx = self.fmt_combo.currentIndex()
         if idx == 0:   # JSON Array
-            lines = [f"  [{x}, {y}]" for x, y in points]
+            lines = [f"  [{fmt_val(x)}, {fmt_val(y)}]" for x, y in points]
             text = "[\n" + ",\n".join(lines) + "\n]"
         elif idx == 1:  # Python List
-            lines = [f"  ({x}, {y})" for x, y in points]
+            lines = [f"  ({fmt_val(x)}, {fmt_val(y)})" for x, y in points]
             text = "[\n" + ",\n".join(lines) + "\n]"
         elif idx == 2:  # Space-separated pairs
-            text = "  ".join(f"{x},{y}" for x, y in points)
+            text = "  ".join(f"{fmt_val(x)},{fmt_val(y)}" for x, y in points)
         else:           # Flat CSV
-            flat = [str(v) for x, y in points for v in (x, y)]
+            flat = [fmt_val(v) for x, y in points for v in (x, y)]
             text = ", ".join(flat)
 
         self.coord_out.setPlainText(text)
@@ -851,10 +898,18 @@ class VisualizeROITab(QWidget):
         cin_lay.addWidget(fmt_hint)
 
         self.coord_in = QTextEdit()
-        self.coord_in.setMinimumHeight(150)
-        self.coord_in.setMaximumHeight(230)
+        self.coord_in.setMinimumHeight(130)
+        self.coord_in.setMaximumHeight(200)
         self.coord_in.setPlaceholderText("Paste your coordinates here…")
         cin_lay.addWidget(self.coord_in)
+
+        self.chk_normalized = QCheckBox("Coordinates are normalized  (0.0–1.0  →  scale to image size)")
+        self.chk_normalized.setToolTip(
+            "When checked, each x is multiplied by image width\n"
+            "and each y is multiplied by image height.\n\n"
+            "Leave unchecked for regular pixel coordinates."
+        )
+        cin_lay.addWidget(self.chk_normalized)
         rlay.addWidget(cin_box)
 
         # Buttons
@@ -923,11 +978,27 @@ class VisualizeROITab(QWidget):
             QMessageBox.warning(self, "No Coordinates", "Please paste coordinates first.")
             return
         try:
-            points = parse_coordinates(text)
-            if len(points) < 2:
+            parsed = parse_coordinates(text)
+            if len(parsed) < 2:
                 raise ValueError("At least 2 points are required to draw a polygon.")
+
+            # Scale normalized coords → pixel coords
+            if self.chk_normalized.isChecked():
+                iw, ih = self.canvas.orig_image.size
+                # Validate range
+                if not _is_normalized(parsed):
+                    raise ValueError(
+                        "Some coordinate values are outside [0.0, 1.0].\n"
+                        "Uncheck 'Coordinates are normalized' if you are "
+                        "using pixel coordinates."
+                    )
+                points = [(int(round(x * iw)), int(round(y * ih))) for x, y in parsed]
+            else:
+                points = [(int(round(x)), int(round(y))) for x, y in parsed]
+
             self.canvas.set_polygon(points)
-            self.lbl_roi_status.setText(f"ROI visualized  ({len(points)} vertices)")
+            norm_tag = "  (normalized → pixel)" if self.chk_normalized.isChecked() else ""
+            self.lbl_roi_status.setText(f"ROI visualized  ({len(points)} vertices){norm_tag}")
             preview = "  ".join(f"({x},{y})" for x, y in points[:6])
             if len(points) > 6:
                 preview += f"  … +{len(points) - 6} more"
