@@ -211,7 +211,23 @@ def parse_coordinates(text: str) -> list[tuple[float, float]]:
         f = float(v)
         return int(f) if f == int(f) else f
 
-    # 1) Try JSON: [[x,y], ...]
+    # 1a) Try Corner JSON: {"roi": {"tl":{x,y}, "tr":{x,y}, "br":{x,y}, "bl":{x,y}}}
+    #     Also accepts the dict without the "roi" wrapper.
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            roi = data.get("roi", data)   # unwrap "roi" key if present
+            if all(k in roi for k in ("tl", "tr", "br", "bl")):
+                return [
+                    (_to_num(roi["tl"]["x"]), _to_num(roi["tl"]["y"])),
+                    (_to_num(roi["tr"]["x"]), _to_num(roi["tr"]["y"])),
+                    (_to_num(roi["br"]["x"]), _to_num(roi["br"]["y"])),
+                    (_to_num(roi["bl"]["x"]), _to_num(roi["bl"]["y"])),
+                ]
+    except (json.JSONDecodeError, TypeError, KeyError):
+        pass
+
+    # 1b) Try JSON: [[x,y], ...]
     try:
         data = json.loads(text)
         if isinstance(data, list) and len(data) >= 2:
@@ -252,6 +268,23 @@ def parse_coordinates(text: str) -> list[tuple[float, float]]:
 def _is_normalized(points: list[tuple[float, float]]) -> bool:
     """Return True if all coordinate values are in the [0.0, 1.0] range."""
     return all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in points)
+
+
+def _assign_corners(points: list[tuple[float, float]]) -> dict:
+    """
+    Map exactly 4 (x, y) points to named corners: tl, tr, br, bl.
+
+    Strategy:
+      - Sort all 4 by y ascending  →  top-2 and bottom-2
+      - Within each pair sort by x →  left / right
+      → top-left, top-right, bottom-left, bottom-right
+    """
+    if len(points) != 4:
+        raise ValueError("Corner JSON requires exactly 4 polygon points.")
+    by_y = sorted(points, key=lambda p: p[1])
+    tl, tr = sorted(by_y[:2], key=lambda p: p[0])
+    bl, br = sorted(by_y[2:], key=lambda p: p[0])
+    return {"tl": tl, "tr": tr, "br": br, "bl": bl}
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +646,7 @@ class DrawROITab(QWidget):
         ("Python List",      "[(x, y), ...]"),
         ("Space-separated",  "x,y x,y ..."),
         ("Flat CSV",         "x1,y1,x2,y2,..."),
+        ("Corner JSON",      "{\"tl\":{x,y}, \"tr\":{x,y}, \"br\":{x,y}, \"bl\":{x,y}}"),
     ]
 
     def __init__(self):
@@ -803,9 +837,12 @@ class DrawROITab(QWidget):
             iw, ih = self.canvas.orig_image.size
             points = [(x / iw, y / ih) for x, y in raw_points]
             fmt_val = lambda v: f"{v:.6f}"
+            # For JSON-native numbers: round to 6 decimal places
+            num_val = lambda v: round(v, 6)
         else:
             points = raw_points
             fmt_val = lambda v: str(v)
+            num_val = lambda v: v
 
         idx = self.fmt_combo.currentIndex()
         if idx == 0:   # JSON Array
@@ -816,9 +853,25 @@ class DrawROITab(QWidget):
             text = "[\n" + ",\n".join(lines) + "\n]"
         elif idx == 2:  # Space-separated pairs
             text = "  ".join(f"{fmt_val(x)},{fmt_val(y)}" for x, y in points)
-        else:           # Flat CSV
+        elif idx == 3:  # Flat CSV
             flat = [fmt_val(v) for x, y in points for v in (x, y)]
             text = ", ".join(flat)
+        else:           # Corner JSON  (idx == 4)
+            if len(points) != 4:
+                text = (
+                    f"# Corner JSON requires exactly 4 points.\n"
+                    f"# Currently {len(points)} point(s) placed.\n"
+                    f"# Place 4 vertices and this format will update automatically."
+                )
+            else:
+                corners = _assign_corners(points)
+                roi_dict = {
+                    "roi": {
+                        k: {"x": num_val(corners[k][0]), "y": num_val(corners[k][1])}
+                        for k in ("tl", "tr", "br", "bl")
+                    }
+                }
+                text = json.dumps(roi_dict, indent=4)
 
         self.coord_out.setPlainText(text)
 
