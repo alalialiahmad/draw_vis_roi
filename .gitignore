@@ -1,0 +1,11 @@
+# PyInstaller build artifacts
+build/
+dist/
+build_env/
+*.spec.bak
+__pycache__/
+*.pyc
+*.pyo
+
+# App data (stored in ~/.roi_tool/, not in repo)
+*.json.bak
